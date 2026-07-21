@@ -23,9 +23,11 @@ Behaviour
   Explorer is enabled (a ce:GetCostAndUsage probe) and reports the result to
   CloudFormation outputs and to the optional phone-home beacon. It cannot enable
   Cost Explorer (AWS has no such API — it is enabled from the Billing console).
-- PHONE_HOME_URL (optional): after tagging, the handler POSTs a small JSON beacon
-  {event, account, region, tagged, ceEnabled, codes} to this URL so the partner can
-  track deployment/compliance centrally.
+- Status beacon (optional, IAM-gated): if BEACON_ROLE_ARN is set, after tagging the
+  handler assumes that cross-account role (in the partner's account, presenting
+  BEACON_EXTERNAL_ID) and writes a small record {account, region, tagged, ceEnabled,
+  codes} directly to the partner's DynamoDB table. There is no public endpoint — an
+  account the partner has not added to the role's trust policy cannot beacon at all.
 - On a scheduled EventBridge invoke (event has no "RequestType") it re-applies the
   same rules — catching resources created since the last run — and beacons.
 - On CloudFormation Delete it does nothing unless RemoveOnDelete is "true", in which
@@ -38,7 +40,6 @@ stack.
 import datetime
 import json
 import os
-import urllib.request
 
 import boto3
 
@@ -134,16 +135,41 @@ def cost_explorer_enabled():
         return False
 
 
-def phone_home(url, payload):
-    """Best-effort telemetry beacon; never raises."""
-    if not url:
+def phone_home(payload):
+    """Best-effort IAM-gated telemetry beacon; never raises.
+
+    Assumes the partner-provided cross-account role (BEACON_ROLE_ARN) with the
+    shared external id, then writes one item to the partner's DynamoDB table. Does
+    nothing if BEACON_ROLE_ARN is unset.
+    """
+    role_arn = os.environ.get("BEACON_ROLE_ARN", "")
+    if not role_arn:
         return
     try:
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
+        creds = boto3.client("sts").assume_role(
+            RoleArn=role_arn, RoleSessionName="prm-beacon",
+            ExternalId=os.environ.get("BEACON_EXTERNAL_ID", "prm"),
+        )["Credentials"]
+        ddb = boto3.client(
+            "dynamodb", region_name=os.environ.get("BEACON_REGION", "us-east-1"),
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
         )
-        urllib.request.urlopen(req, timeout=10)
+        now = str(int(datetime.datetime.now().timestamp()))
+        ddb.put_item(
+            TableName=os.environ.get("BEACON_TABLE", "prm-phone-home"),
+            Item={
+                "pk": {"S": "ACCT#" + payload["account"]},
+                "sk": {"S": payload["region"] + "#" + now},
+                "account": {"S": payload["account"]},
+                "region": {"S": payload["region"]},
+                "event": {"S": str(payload["event"])},
+                "tagged": {"N": str(payload["tagged"])},
+                "ceEnabled": {"BOOL": bool(payload["ceEnabled"])},
+                "codes": {"S": ",".join(payload.get("codes") or [])},
+            },
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -152,14 +178,13 @@ def handler(event, context):
     client = boto3.client("resourcegroupstaggingapi")
     account = boto3.client("sts").get_caller_identity()["Account"]
     region = os.environ.get("AWS_REGION", "")
-    url = os.environ.get("PHONE_HOME_URL", "")
     preserve = os.environ.get("PRESERVE", "true").lower() == "true"
 
     # Scheduled re-tag (EventBridge) — no CloudFormation lifecycle.
     if "RequestType" not in event:
         rules = json.loads(os.environ.get("RULES", "[]"))
         tagged = apply_rules(client, rules, preserve)
-        phone_home(url, {"event": "schedule", "account": account,
+        phone_home({"event": "schedule", "account": account,
                          "region": region, "tagged": tagged,
                          "ceEnabled": cost_explorer_enabled(),
                          "codes": [r.get("productCode") for r in rules]})
@@ -180,7 +205,7 @@ def handler(event, context):
             rules = json.loads(rules)
         tagged = apply_rules(client, rules, preserve)
         ce_ok = cost_explorer_enabled()
-        phone_home(url, {"event": request_type, "account": account,
+        phone_home({"event": request_type, "account": account,
                          "region": region, "tagged": tagged, "ceEnabled": ce_ok,
                          "codes": [r.get("productCode") for r in rules]})
         cfnresponse.send(event, context, cfnresponse.SUCCESS,

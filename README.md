@@ -82,7 +82,7 @@ aws cloudformation deploy \
 | `PreserveExistingTags` | `true` | **Won't overwrite another partner's tag.** If a resource already has an `aws-apn-id` tag from a different vendor, it's left alone. Set `false` only if you intend to reassign everything to Jacobian. |
 | `ReTagSchedule` | off | Re-run automatically (e.g. `rate(1 day)`) so resources you create later get tagged too. Recommended. |
 | `RemoveOnDelete` | `false` | If you delete the stack, leave the tags in place (default) so attribution isn't interrupted. Set `true` to also remove the tags. |
-| `PhoneHomeUrl` | off | If Jacobian gives you a URL, the template sends us a small status note (your account id, region, how many resources were tagged, and whether Cost Explorer is on) so we can confirm everything worked. No resource data or credentials are ever sent. |
+| `BeaconRoleArn` (+ `BeaconExternalId`, `BeaconTable`, `BeaconRegion`) | off | If Jacobian gives you these values, the template sends us a small status note (your account id, region, how many resources were tagged, and whether Cost Explorer is on) so we can confirm everything worked. It works by assuming an IAM role **we** control — nothing is sent unless you fill these in, and no resource data or credentials are ever sent. See [`docs/phone-home.md`](docs/phone-home.md). |
 
 ## Does this overwrite tags from my other vendors?
 
@@ -126,9 +126,11 @@ skips resources already tagged for another partner, applies the tag in batches,
 checks Cost Explorer, and optionally posts a status beacon. An optional EventBridge
 schedule re-runs it to catch new resources.
 
-Partners: [`templates/phone-home-receiver.yaml`](templates/phone-home-receiver.yaml)
-is a ready-to-deploy receiver (API Gateway → Lambda → DynamoDB) for the status
-beacons, for your own account.
+Partners: [`templates/phone-home-role.yaml`](templates/phone-home-role.yaml) deploys
+an IAM-gated receiver in your own account — a cross-account role (trust policy
+allow-lists customer account ids + external id) that customers assume to write status
+beacons to your DynamoDB table. No public endpoint. See
+[`docs/phone-home.md`](docs/phone-home.md).
 
 ## License
 

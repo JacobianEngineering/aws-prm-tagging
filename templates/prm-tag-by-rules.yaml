@@ -6,7 +6,8 @@ Description: >-
   is tagged by the FIRST matching rule (a resource can carry only one aws-apn-id
   tag). By default it never overwrites another partner's existing aws-apn-id tag,
   checks that Cost Explorer (the other PRM prerequisite) is enabled, and can send a
-  status beacon to a partner-provided URL. Optionally re-runs on a schedule.
+  status beacon to the partner by assuming a cross-account IAM role they provide.
+  Optionally re-runs on a schedule.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -14,13 +15,18 @@ Metadata:
       - Label: { default: Tagging rules }
         Parameters: [TaggingRules]
       - Label: { default: Options }
-        Parameters: [PreserveExistingTags, ReTagSchedule, RemoveOnDelete, PhoneHomeUrl]
+        Parameters: [PreserveExistingTags, ReTagSchedule, RemoveOnDelete]
+      - Label: { default: "Status beacon (optional, provided by your partner)" }
+        Parameters: [BeaconRoleArn, BeaconExternalId, BeaconTable, BeaconRegion]
     ParameterLabels:
       TaggingRules: { default: Tagging rules (JSON) }
       PreserveExistingTags: { default: Preserve another partner's existing tag }
       ReTagSchedule: { default: Re-tag schedule (optional) }
       RemoveOnDelete: { default: Remove tags when stack is deleted }
-      PhoneHomeUrl: { default: Status beacon URL (optional) }
+      BeaconRoleArn: { default: Beacon role ARN }
+      BeaconExternalId: { default: Beacon external id }
+      BeaconTable: { default: Beacon table name }
+      BeaconRegion: { default: Beacon table region }
 
 Parameters:
   TaggingRules:
@@ -58,16 +64,31 @@ Parameters:
     Description: >-
       If true, deleting this stack removes the aws-apn-id tag from all resources.
       Default false keeps tags so revenue attribution is not interrupted.
-  PhoneHomeUrl:
+  BeaconRoleArn:
     Type: String
     Default: ""
     Description: >-
-      Optional HTTPS URL. If set, the Lambda POSTs a small JSON status beacon
-      (account, region, resources tagged, Cost Explorer status, product codes)
-      after each run, so your partner can track deployment and PRM readiness.
+      Optional. The cross-account IAM role ARN your partner gave you. If set, after
+      tagging the Lambda assumes this role and writes a small status record
+      (account, region, resources tagged, Cost Explorer status) to the partner's
+      account. Nothing is sent unless this is set, and only the partner-controlled
+      account can be written to.
+  BeaconExternalId:
+    Type: String
+    Default: "jacobian-prm"
+    Description: External id to present when assuming the beacon role (from your partner).
+  BeaconTable:
+    Type: String
+    Default: "prm-phone-home"
+    Description: DynamoDB table name in the partner account (from your partner).
+  BeaconRegion:
+    Type: String
+    Default: "us-east-1"
+    Description: Region of the partner's beacon table.
 
 Conditions:
   HasSchedule: !Not [!Equals [!Ref ReTagSchedule, ""]]
+  HasBeacon: !Not [!Equals [!Ref BeaconRoleArn, ""]]
 
 Resources:
   TaggerRole:
@@ -158,6 +179,19 @@ Resources:
                   - redshift:CreateTags
                   - redshift:DeleteTags
 
+  BeaconAssumePolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasBeacon
+    Properties:
+      PolicyName: prm-beacon-assume
+      Roles: [!Ref TaggerRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !Ref BeaconRoleArn
+
   TaggerFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -171,10 +205,13 @@ Resources:
         Variables:
           RULES: !Ref TaggingRules
           PRESERVE: !Ref PreserveExistingTags
-          PHONE_HOME_URL: !Ref PhoneHomeUrl
+          BEACON_ROLE_ARN: !Ref BeaconRoleArn
+          BEACON_EXTERNAL_ID: !Ref BeaconExternalId
+          BEACON_TABLE: !Ref BeaconTable
+          BEACON_REGION: !Ref BeaconRegion
       Code:
         ZipFile: |
-          import json,os,datetime,boto3,urllib.request
+          import json,os,datetime,boto3
           K="aws-apn-id"
           def g(c,**f):
            o=[];t=None
@@ -211,18 +248,21 @@ Resources:
             e=datetime.date.today();s=e-datetime.timedelta(days=1)
             boto3.client("ce").get_cost_and_usage(TimePeriod={"Start":s.isoformat(),"End":e.isoformat()},Granularity="DAILY",Metrics=["UnblendedCost"]);return True
            except Exception:return False
-          def ph(u,d):
-           if not u:return
-           try:urllib.request.urlopen(urllib.request.Request(u,data=json.dumps(d).encode(),headers={"Content-Type":"application/json"}),timeout=10)
+          def ph(d):
+           ra=os.environ.get("BEACON_ROLE_ARN","")
+           if not ra:return
+           try:
+            cr=boto3.client("sts").assume_role(RoleArn=ra,RoleSessionName="prm-beacon",ExternalId=os.environ.get("BEACON_EXTERNAL_ID","prm"))["Credentials"]
+            boto3.client("dynamodb",region_name=os.environ.get("BEACON_REGION","us-east-1"),aws_access_key_id=cr["AccessKeyId"],aws_secret_access_key=cr["SecretAccessKey"],aws_session_token=cr["SessionToken"]).put_item(TableName=os.environ.get("BEACON_TABLE","prm-phone-home"),Item={"pk":{"S":"ACCT#"+d["account"]},"sk":{"S":d["region"]+"#"+str(int(datetime.datetime.now().timestamp()))},"account":{"S":d["account"]},"region":{"S":d["region"]},"event":{"S":str(d["event"])},"tagged":{"N":str(d["tagged"])},"ceEnabled":{"BOOL":bool(d["ceEnabled"])},"codes":{"S":",".join(d.get("codes") or [])}})
            except Exception:pass
           def handler(e,ctx):
            c=boto3.client("resourcegroupstaggingapi")
            acct=boto3.client("sts").get_caller_identity()["Account"]
-           reg=os.environ.get("AWS_REGION","");u=os.environ.get("PHONE_HOME_URL","")
+           reg=os.environ.get("AWS_REGION","")
            keep=os.environ.get("PRESERVE","true").lower()=="true"
            if "RequestType" not in e:
             R=json.loads(os.environ.get("RULES","[]"));n=ap(c,R,keep)
-            ph(u,{"event":"schedule","account":acct,"region":reg,"tagged":n,"ceEnabled":ce(),"codes":[r.get("productCode") for r in R]});return
+            ph({"event":"schedule","account":acct,"region":reg,"tagged":n,"ceEnabled":ce(),"codes":[r.get("productCode") for r in R]});return
            import cfnresponse
            p=e.get("ResourceProperties",{});rt=e["RequestType"]
            try:
@@ -233,7 +273,7 @@ Resources:
             R=p.get("Rules",[])
             if isinstance(R,str):R=json.loads(R)
             n=ap(c,R,keep);ok=ce()
-            ph(u,{"event":rt,"account":acct,"region":reg,"tagged":n,"ceEnabled":ok,"codes":[r.get("productCode") for r in R]})
+            ph({"event":rt,"account":acct,"region":reg,"tagged":n,"ceEnabled":ok,"codes":[r.get("productCode") for r in R]})
             cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{"tagged":n,"ceEnabled":ok})
            except Exception as x:
             cfnresponse.send(e,ctx,cfnresponse.FAILED,{"error":str(x)[:300]})
