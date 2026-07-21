@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# AWS / local
+.aws-sam/
+packaged.yaml
+*.zip
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

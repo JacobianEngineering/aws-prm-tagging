@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS Partner Revenue Measurement (PRM) - tag resources by rule. Each rule maps a
+  set of resources (by service/resource-type and/or by existing tags) to a partner
+  product code (aws-apn-id = pc:<code>). Rules are evaluated in order; each resource
+  is tagged by the FIRST matching rule (a resource can carry only one aws-apn-id
+  tag). Deploys a Lambda-backed custom resource using the Resource Groups Tagging
+  API, optionally re-running on a schedule to catch new resources.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Tagging rules }
+        Parameters: [TaggingRules]
+      - Label: { default: Options }
+        Parameters: [ReTagSchedule, RemoveOnDelete]
+    ParameterLabels:
+      TaggingRules: { default: Tagging rules (JSON) }
+      ReTagSchedule: { default: Re-tag schedule (optional) }
+      RemoveOnDelete: { default: Remove tags when stack is deleted }
+
+Parameters:
+  TaggingRules:
+    Type: String
+    Default: "[]"
+    Description: >-
+      JSON array of rules, evaluated in order. Each rule: {"productCode":"<code>",
+      "resourceTypes":["ec2:instance","rds:db"], "tagFilters":[{"Key":"Public",
+      "Values":["true"]}]}. resourceTypes and tagFilters are optional; a rule with
+      neither matches every taggable resource. Example (public-facing -> pen test,
+      databases -> managed compliance, everything else -> managed services):
+      [{"productCode":"PENTEST_CODE","tagFilters":[{"Key":"PublicFacing",
+      "Values":["true"]}]},{"productCode":"COMPLIANCE_CODE","resourceTypes":
+      ["rds:db","dynamodb:table"]},{"productCode":"MANAGED_SVC_CODE"}].
+      Default "[]" tags nothing - supply your rules.
+  ReTagSchedule:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional EventBridge schedule expression to re-run tagging (catches new
+      resources), e.g. "rate(1 day)". Leave blank to run only on stack
+      create/update.
+  RemoveOnDelete:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      If true, deleting this stack removes the aws-apn-id tag from all resources.
+      Default false keeps tags so revenue attribution is not interrupted.
+
+Conditions:
+  HasSchedule: !Not [!Equals [!Ref ReTagSchedule, ""]]
+
+Resources:
+  TaggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: prm-tagging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: TaggingApi
+                Effect: Allow
+                Action:
+                  - tag:GetResources
+                  - tag:TagResources
+                  - tag:UntagResources
+                Resource: "*"
+              - Sid: ServiceLevelTagging
+                Effect: Allow
+                Resource: "*"
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - s3:GetBucketTagging
+                  - s3:PutBucketTagging
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                  - rds:ListTagsForResource
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                  - eks:TagResource
+                  - eks:UntagResource
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - elasticfilesystem:TagResource
+                  - elasticfilesystem:UntagResource
+                  - backup:TagResource
+                  - backup:UntagResource
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - apigateway:PUT
+                  - apigateway:DELETE
+                  - logs:TagLogGroup
+                  - logs:UntagLogGroup
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - sns:TagResource
+                  - sns:UntagResource
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                  - elasticache:AddTagsToResource
+                  - elasticache:RemoveTagsFromResource
+                  - es:AddTags
+                  - es:RemoveTags
+                  - states:TagResource
+                  - states:UntagResource
+                  - kms:TagResource
+                  - kms:UntagResource
+                  - ecr:TagResource
+                  - ecr:UntagResource
+                  - sagemaker:AddTags
+                  - sagemaker:DeleteTags
+                  - bedrock:TagResource
+                  - bedrock:UntagResource
+                  - fsx:TagResource
+                  - fsx:UntagResource
+                  - glue:TagResource
+                  - glue:UntagResource
+                  - kinesis:AddTagsToStream
+                  - kinesis:RemoveTagsFromStream
+                  - firehose:TagDeliveryStream
+                  - firehose:UntagDeliveryStream
+                  - redshift:CreateTags
+                  - redshift:DeleteTags
+
+  TaggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Applies PRM aws-apn-id tags to existing resources by rule.
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 256
+      Role: !GetAtt TaggerRole.Arn
+      Environment:
+        Variables:
+          RULES: !Ref TaggingRules
+      Code:
+        ZipFile: |
+          import json,os,boto3
+          K="aws-apn-id"
+          def g(c,**f):
+           a=[];t=None
+           while 1:
+            if t:f["PaginationToken"]=t
+            r=c.get_resources(ResourcesPerPage=100,**f)
+            a+=[m["ResourceARN"] for m in r["ResourceTagMappingList"]]
+            t=r.get("PaginationToken")
+            if not t:break
+           return a
+          def b(a,fn):
+           for i in range(0,len(a),20):fn(a[i:i+20])
+          def ap(c,rules):
+           s=set();n=0
+           for r in rules:
+            f={}
+            if r.get("resourceTypes"):f["ResourceTypeFilters"]=r["resourceTypes"]
+            if r.get("tagFilters"):f["TagFilters"]=r["tagFilters"]
+            a=[x for x in g(c,**f) if x not in s]
+            v="pc:"+r["productCode"]
+            b(a,lambda z,v=v:c.tag_resources(ResourceARNList=z,Tags={K:v}))
+            s.update(a);n+=len(a)
+           return n
+          def handler(e,ctx):
+           c=boto3.client("resourcegroupstaggingapi")
+           if "RequestType" not in e:
+            ap(c,json.loads(os.environ.get("RULES","[]")));return
+           import cfnresponse
+           p=e.get("ResourceProperties",{});rt=e["RequestType"]
+           try:
+            if rt=="Delete":
+             if str(p.get("RemoveOnDelete","false")).lower()=="true":
+              a=g(c,TagFilters=[{"Key":K}]);b(a,lambda z:c.untag_resources(ResourceARNList=z,TagKeys=[K]))
+             cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{});return
+            R=p.get("Rules",[])
+            if isinstance(R,str):R=json.loads(R)
+            n=ap(c,R)
+            cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{"tagged":n})
+           except Exception as x:
+            cfnresponse.send(e,ctx,cfnresponse.FAILED,{"error":str(x)[:300]})
+
+  TagApplier:
+    Type: Custom::PrmTagger
+    Properties:
+      ServiceToken: !GetAtt TaggerFunction.Arn
+      RemoveOnDelete: !Ref RemoveOnDelete
+      Rules: !Ref TaggingRules
+
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: HasSchedule
+    Properties:
+      Description: Periodically re-run PRM tagging to catch new resources.
+      ScheduleExpression: !Ref ReTagSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt TaggerFunction.Arn
+          Id: prm-retag
+
+  SchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasSchedule
+    Properties:
+      FunctionName: !Ref TaggerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+Outputs:
+  FunctionArn:
+    Description: ARN of the tagging Lambda.
+    Value: !GetAtt TaggerFunction.Arn

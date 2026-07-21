@@ -1,0 +1,5 @@
+[
+  { "productCode": "COMPLIANCE_CODE",  "resourceTypes": ["rds:db", "dynamodb:table", "backup:backup-vault"] },
+  { "productCode": "AI_CODE",          "resourceTypes": ["bedrock:agent", "sagemaker:endpoint"] },
+  { "productCode": "MANAGED_SVC_CODE" }
+]

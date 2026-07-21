@@ -1,0 +1,5 @@
+[
+  { "productCode": "PENTEST_CODE",     "tagFilters": [{ "Key": "PublicFacing", "Values": ["true"] }] },
+  { "productCode": "PENTEST_CODE",     "resourceTypes": ["cloudfront:distribution", "elasticloadbalancing:loadbalancer", "apigateway:restapis"] },
+  { "productCode": "MANAGED_SVC_CODE" }
+]

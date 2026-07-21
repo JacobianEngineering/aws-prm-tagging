@@ -1,0 +1,5 @@
+[
+  { "ParameterKey": "ProductCode",    "ParameterValue": "REPLACE_WITH_YOUR_PRODUCT_CODE" },
+  { "ParameterKey": "ReTagSchedule",  "ParameterValue": "rate(1 day)" },
+  { "ParameterKey": "RemoveOnDelete", "ParameterValue": "false" }
+]
