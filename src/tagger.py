@@ -30,8 +30,10 @@ Behaviour
   account the partner has not added to the role's trust policy cannot beacon at all.
 - On a scheduled EventBridge invoke (event has no "RequestType") it re-applies the
   same rules — catching resources created since the last run — and beacons.
-- On CloudFormation Delete it does nothing unless RemoveOnDelete is "true", in which
-  case it removes the aws-apn-id tag from every resource that carries it.
+- On CloudFormation Delete it leaves tags in place unless PreserveOnDelete is "false"
+  (default "true"), in which case it removes the aws-apn-id tag from every resource
+  that carries it. Keeping tags by default means a stack deletion does not interrupt
+  revenue attribution.
 
 Per-resource tagging failures (e.g. Kubernetes pods, deleted snapshots) are returned
 by the API in FailedResourcesMap and are intentionally ignored — they never fail the
@@ -196,7 +198,7 @@ def handler(event, context):
     props = event.get("ResourceProperties", {})
     try:
         if request_type == "Delete":
-            if str(props.get("RemoveOnDelete", "false")).lower() == "true":
+            if str(props.get("PreserveOnDelete", "true")).lower() != "true":
                 remove_all(client)
             cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
             return

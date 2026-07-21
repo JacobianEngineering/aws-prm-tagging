@@ -15,14 +15,14 @@ Metadata:
       - Label: { default: Tagging rules }
         Parameters: [TaggingRules]
       - Label: { default: Options }
-        Parameters: [PreserveExistingTags, ReTagSchedule, RemoveOnDelete]
+        Parameters: [PreserveExistingTags, ReTagSchedule, PreserveTagsOnDelete]
       - Label: { default: "Status beacon (optional, provided by your partner)" }
         Parameters: [BeaconRoleArn, BeaconExternalId, BeaconTable, BeaconRegion]
     ParameterLabels:
       TaggingRules: { default: Tagging rules (JSON) }
       PreserveExistingTags: { default: Preserve another partner's existing tag }
-      ReTagSchedule: { default: Re-tag schedule (optional) }
-      RemoveOnDelete: { default: Remove tags when stack is deleted }
+      ReTagSchedule: { default: Re-tag schedule }
+      PreserveTagsOnDelete: { default: Keep tags when stack is deleted }
       BeaconRoleArn: { default: Beacon role ARN }
       BeaconExternalId: { default: Beacon external id }
       BeaconTable: { default: Beacon table name }
@@ -52,18 +52,20 @@ Parameters:
       attribution. Set false to overwrite every matched resource.
   ReTagSchedule:
     Type: String
-    Default: ""
+    Default: "rate(1 day)"
     Description: >-
-      Optional EventBridge schedule expression to re-run tagging (catches new
-      resources), e.g. "rate(1 day)". Leave blank to run only on stack
+      EventBridge schedule expression to re-run tagging, which catches newly created
+      resources and re-applies any tags stripped by an IaC deploy. Defaults to daily
+      (rate(1 day)). Set to an empty string to disable and tag only on stack
       create/update.
-  RemoveOnDelete:
+  PreserveTagsOnDelete:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
     Description: >-
-      If true, deleting this stack removes the aws-apn-id tag from all resources.
-      Default false keeps tags so revenue attribution is not interrupted.
+      If true (default), deleting this stack LEAVES the aws-apn-id tags in place so
+      revenue attribution is not interrupted. Set false to remove all aws-apn-id
+      tags when the stack is deleted.
   BeaconRoleArn:
     Type: String
     Default: ""
@@ -267,7 +269,7 @@ Resources:
            p=e.get("ResourceProperties",{});rt=e["RequestType"]
            try:
             if rt=="Delete":
-             if str(p.get("RemoveOnDelete","false")).lower()=="true":
+             if str(p.get("PreserveOnDelete","true")).lower()!="true":
               b([m["ResourceARN"] for m in g(c,TagFilters=[{"Key":K}])],lambda z:c.untag_resources(ResourceARNList=z,TagKeys=[K]))
              cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{});return
             R=p.get("Rules",[])
@@ -282,7 +284,7 @@ Resources:
     Type: Custom::PrmTagger
     Properties:
       ServiceToken: !GetAtt TaggerFunction.Arn
-      RemoveOnDelete: !Ref RemoveOnDelete
+      PreserveOnDelete: !Ref PreserveTagsOnDelete
       Rules: !Ref TaggingRules
 
   ScheduleRule:

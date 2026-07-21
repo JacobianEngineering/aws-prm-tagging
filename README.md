@@ -80,8 +80,8 @@ aws cloudformation deploy \
 | Option | Default | What it does |
 | --- | --- | --- |
 | `PreserveExistingTags` | `true` | **Won't overwrite another partner's tag.** If a resource already has an `aws-apn-id` tag from a different vendor, it's left alone. Set `false` only if you intend to reassign everything to Jacobian. |
-| `ReTagSchedule` | off | Re-run automatically (e.g. `rate(1 day)`) so resources you create later get tagged too. Recommended. |
-| `RemoveOnDelete` | `false` | If you delete the stack, leave the tags in place (default) so attribution isn't interrupted. Set `true` to also remove the tags. |
+| `ReTagSchedule` | `rate(1 day)` (on) | Re-runs tagging on a schedule so resources you create later get tagged too, and tags stripped by an IaC deploy get re-applied. On by default (daily). Set to an empty string to turn it off. |
+| `PreserveTagsOnDelete` | `true` | If you delete the stack, the tags are **left in place** by default so attribution isn't interrupted. Set `false` to also remove the tags on stack deletion. |
 | `BeaconRoleArn` (+ `BeaconExternalId`, `BeaconTable`, `BeaconRegion`) | off | If Jacobian gives you these values, the template sends us a small status note (your account id, region, how many resources were tagged, and whether Cost Explorer is on) so we can confirm everything worked. It works by assuming an IAM role **we** control — nothing is sent unless you fill these in, and no resource data or credentials are ever sent. See [`docs/phone-home.md`](docs/phone-home.md). |
 
 ## Does this overwrite tags from my other vendors?
@@ -108,12 +108,13 @@ aws resourcegroupstaggingapi get-resources \
 
 - **Per region.** Deploy once per AWS region you use.
 - **Infrastructure-as-code drift.** If you manage resources with Terraform/CDK/
-  CloudFormation of your own, a future deploy could strip the tag. Turn on
-  `ReTagSchedule` to re-apply automatically, or add `aws-apn-id` to your own default
-  tags. (We're happy to advise.)
+  CloudFormation of your own, a future deploy could strip the tag. The daily
+  `ReTagSchedule` (on by default) re-applies it automatically; for a permanent fix,
+  add `aws-apn-id` to your own default tags. (We're happy to advise.)
 - **Cost.** The helper function runs for a few seconds. Effectively free.
 - **Removing it.** Delete the `jacobian-prm-tagging` stack anytime. By default the
-  tags remain; set `RemoveOnDelete=true` first if you want them gone.
+  tags remain (`PreserveTagsOnDelete=true`); set it to `false` first if you want them
+  gone.
 
 ## For engineers: how it works
 
