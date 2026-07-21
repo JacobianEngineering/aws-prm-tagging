@@ -123,7 +123,8 @@ the template is fully self-contained — no S3 packaging). A `Custom::PrmTagger`
 resource invokes it on create/update: it enumerates resources through the
 [Resource Groups Tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/Welcome.html),
 skips resources already tagged for another partner, applies the tag in batches,
-checks Cost Explorer, and optionally posts a status beacon. An optional EventBridge
+checks Cost Explorer, and optionally writes a status beacon (by assuming a partner
+role). An optional EventBridge
 schedule re-runs it to catch new resources.
 
 Partners: [`templates/phone-home-role.yaml`](templates/phone-home-role.yaml) deploys

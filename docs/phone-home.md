@@ -72,16 +72,33 @@ the stack. **Scale ceiling:** account ids live in the role trust policy, which h
 (~115), and unbounded by sharding across multiple roles. `aws:PrincipalOrgID` does
 not help here because customers are outside the partner's AWS Organization.
 
-## Isolation note
+## Identity and isolation
 
-With a single shared role, every allow-listed customer assumes the same role and so
-presents as the partner's account once assumed — meaning a resource-level condition
-like `dynamodb:LeadingKeys` cannot key on the caller's real account, and a
-(vetted, allow-listed) customer could in principle write another customer's
-partition key. The trust policy still strictly controls **who** may write at all,
-which is the primary gate. If you need hard per-customer write isolation, deploy one
-role per customer (each trust-scoped to a single account with a hardcoded
-`LeadingKeys` condition) — more roles to manage, but airtight.
+**Identifying who beaconed.** The beacon's `account` field is self-reported, which is
+fine for a dashboard among trusted customers. If you ever need *authoritative* proof
+of who called, it is already in **CloudTrail**: every `AssumeRole` event records the
+real caller account, regardless of the payload and requiring no special permission in
+the customer account. That is the portable, unforgeable source of identity.
+
+**Why not session tags?** A tempting single-role design is to have the customer pass
+their account as a session tag, bound in the trust policy via
+`aws:RequestTag/customer == ${aws:PrincipalAccount}`, so the verified account rides
+into the session as `aws:PrincipalTag/customer` and scopes `dynamodb:LeadingKeys`.
+This was tested and rejected: passing a session tag requires **`sts:TagSession` in
+the customer's account**, which an org SCP or permission boundary can deny (observed
+in practice). Since the tool is handed to customers whose accounts we do not control,
+session tags are not portable — a restricted customer would silently fail to beacon.
+`sts:SourceIdentity` has the same caller-permission dependency; `RoleSessionName`
+carries through with no extra permission but is caller-set and therefore spoofable.
+
+**Hard isolation.** With a single shared role, every customer presents as the partner
+account once assumed, so `dynamodb:LeadingKeys` cannot key on the caller's real
+account and a (vetted, allow-listed) customer could in principle write another's
+partition. The trust policy still strictly controls **who** may write at all — the
+primary gate. If you need enforced per-customer isolation, deploy **one role per
+customer** (plain `AssumeRole`, works everywhere): trust-scoped to a single account
+with a hardcoded `LeadingKeys` condition, the role ARN being the identity. More roles
+to manage, but airtight and dependency-free.
 
 ## Building a dashboard
 
