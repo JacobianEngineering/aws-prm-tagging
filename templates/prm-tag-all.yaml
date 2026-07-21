@@ -3,7 +3,9 @@ Description: >-
   AWS Partner Revenue Measurement (PRM) - tag every supported resource in this
   account and region with a single partner product code (aws-apn-id = pc:<code>).
   Deploys a Lambda-backed custom resource that uses the Resource Groups Tagging
-  API. Optionally re-runs on a schedule to catch newly created resources.
+  API. By default it never overwrites another partner's existing aws-apn-id tag,
+  checks that Cost Explorer (the other PRM prerequisite) is enabled, and can send a
+  status beacon to a partner-provided URL. Optionally re-runs on a schedule.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -11,11 +13,13 @@ Metadata:
       - Label: { default: Partner product }
         Parameters: [ProductCode]
       - Label: { default: Options }
-        Parameters: [ReTagSchedule, RemoveOnDelete]
+        Parameters: [PreserveExistingTags, ReTagSchedule, RemoveOnDelete, PhoneHomeUrl]
     ParameterLabels:
       ProductCode: { default: AWS Marketplace product code }
+      PreserveExistingTags: { default: Preserve another partner's existing tag }
       ReTagSchedule: { default: Re-tag schedule (optional) }
       RemoveOnDelete: { default: Remove tags when stack is deleted }
+      PhoneHomeUrl: { default: Status beacon URL (optional) }
 
 Parameters:
   ProductCode:
@@ -25,6 +29,14 @@ Parameters:
       The AWS Marketplace product code (NOT the prod-... id or UUID). Lower-case
       alphanumeric, e.g. 1xot9aw3srsz3tb25p2b17dmc. The tag applied is
       aws-apn-id = pc:<this value>.
+  PreserveExistingTags:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      If true (default), resources that already carry a DIFFERENT partner's
+      aws-apn-id tag are left untouched, so you never overwrite another partner's
+      attribution. Set false to overwrite every matched resource.
   ReTagSchedule:
     Type: String
     Default: ""
@@ -39,6 +51,13 @@ Parameters:
     Description: >-
       If true, deleting this stack removes the aws-apn-id tag from all resources.
       Default false keeps tags so revenue attribution is not interrupted.
+  PhoneHomeUrl:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional HTTPS URL. If set, the Lambda POSTs a small JSON status beacon
+      (account, region, resources tagged, Cost Explorer status, product codes)
+      after each run, so your partner can track deployment and PRM readiness.
 
 Conditions:
   HasSchedule: !Not [!Equals [!Ref ReTagSchedule, ""]]
@@ -60,12 +79,13 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: TaggingApi
+              - Sid: TaggingApiAndReadOnlyChecks
                 Effect: Allow
                 Action:
                   - tag:GetResources
                   - tag:TagResources
                   - tag:UntagResources
+                  - ce:GetCostAndUsage
                 Resource: "*"
               - Sid: ServiceLevelTagging
                 Effect: Allow
@@ -143,47 +163,71 @@ Resources:
       Environment:
         Variables:
           RULES: !Sub '[{"productCode":"${ProductCode}"}]'
+          PRESERVE: !Ref PreserveExistingTags
+          PHONE_HOME_URL: !Ref PhoneHomeUrl
       Code:
         ZipFile: |
-          import json,os,boto3
+          import json,os,datetime,boto3,urllib.request
           K="aws-apn-id"
           def g(c,**f):
-           a=[];t=None
+           o=[];t=None
            while 1:
             if t:f["PaginationToken"]=t
             r=c.get_resources(ResourcesPerPage=100,**f)
-            a+=[m["ResourceARN"] for m in r["ResourceTagMappingList"]]
-            t=r.get("PaginationToken")
+            o+=r["ResourceTagMappingList"];t=r.get("PaginationToken")
             if not t:break
-           return a
+           return o
           def b(a,fn):
            for i in range(0,len(a),20):fn(a[i:i+20])
-          def ap(c,rules):
-           s=set();n=0
+          def ex(m):
+           for t in m.get("Tags",[]):
+            if t["Key"]==K:return t["Value"]
+          def ap(c,rules,keep):
+           seen=set();n=0
            for r in rules:
             f={}
             if r.get("resourceTypes"):f["ResourceTypeFilters"]=r["resourceTypes"]
             if r.get("tagFilters"):f["TagFilters"]=r["tagFilters"]
-            a=[x for x in g(c,**f) if x not in s]
-            v="pc:"+r["productCode"]
-            b(a,lambda z,v=v:c.tag_resources(ResourceARNList=z,Tags={K:v}))
-            s.update(a);n+=len(a)
+            v="pc:"+r["productCode"];arns=[]
+            for m in g(c,**f):
+             a=m["ResourceARN"]
+             if a in seen:continue
+             e=ex(m)
+             if e==v:seen.add(a);continue
+             if e and keep:continue
+             arns.append(a)
+            b(arns,lambda z,v=v:c.tag_resources(ResourceARNList=z,Tags={K:v}))
+            seen.update(arns);n+=len(arns)
            return n
+          def ce():
+           try:
+            e=datetime.date.today();s=e-datetime.timedelta(days=1)
+            boto3.client("ce").get_cost_and_usage(TimePeriod={"Start":s.isoformat(),"End":e.isoformat()},Granularity="DAILY",Metrics=["UnblendedCost"]);return True
+           except Exception:return False
+          def ph(u,d):
+           if not u:return
+           try:urllib.request.urlopen(urllib.request.Request(u,data=json.dumps(d).encode(),headers={"Content-Type":"application/json"}),timeout=10)
+           except Exception:pass
           def handler(e,ctx):
            c=boto3.client("resourcegroupstaggingapi")
+           acct=boto3.client("sts").get_caller_identity()["Account"]
+           reg=os.environ.get("AWS_REGION","");u=os.environ.get("PHONE_HOME_URL","")
+           keep=os.environ.get("PRESERVE","true").lower()=="true"
            if "RequestType" not in e:
-            ap(c,json.loads(os.environ.get("RULES","[]")));return
+            R=json.loads(os.environ.get("RULES","[]"));n=ap(c,R,keep)
+            ph(u,{"event":"schedule","account":acct,"region":reg,"tagged":n,"ceEnabled":ce(),"codes":[r.get("productCode") for r in R]});return
            import cfnresponse
            p=e.get("ResourceProperties",{});rt=e["RequestType"]
            try:
             if rt=="Delete":
              if str(p.get("RemoveOnDelete","false")).lower()=="true":
-              a=g(c,TagFilters=[{"Key":K}]);b(a,lambda z:c.untag_resources(ResourceARNList=z,TagKeys=[K]))
+              b([m["ResourceARN"] for m in g(c,TagFilters=[{"Key":K}])],lambda z:c.untag_resources(ResourceARNList=z,TagKeys=[K]))
              cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{});return
             R=p.get("Rules",[])
             if isinstance(R,str):R=json.loads(R)
-            n=ap(c,R)
-            cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{"tagged":n})
+            n=ap(c,R,keep);ok=ce()
+            ph(u,{"event":rt,"account":acct,"region":reg,"tagged":n,"ceEnabled":ok,"codes":[r.get("productCode") for r in R]})
+            cfnresponse.send(e,ctx,cfnresponse.SUCCESS,{"tagged":n,"ceEnabled":ok})
            except Exception as x:
             cfnresponse.send(e,ctx,cfnresponse.FAILED,{"error":str(x)[:300]})
 

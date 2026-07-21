@@ -1,148 +1,135 @@
-# AWS PRM Resource Tagging — CloudFormation
+# Tag your AWS resources for Jacobian Engineering (AWS PRM)
 
-CloudFormation templates that tag existing AWS resources for **AWS Partner Revenue
-Measurement (PRM)**, so an AWS Partner can measure the AWS consumption their
-solutions drive.
+This repository gives you a one-click **AWS CloudFormation** template that tags the
+AWS resources Jacobian Engineering helps you run, so that AWS can correctly measure
+the value of that work under **AWS Partner Revenue Measurement (PRM)**. It costs you
+nothing, changes none of your resources except adding one tag, and takes a few
+minutes.
 
-PRM attributes AWS spend to a partner when a resource carries the tag:
+**Need help? We'll do it with you or for you.**
+📧 support@jacobianengineering.com &nbsp;•&nbsp; ☎️ (415) 644-8208 &nbsp;•&nbsp; 🌐 [jacobianengineering.com](https://jacobianengineering.com)
+
+---
+
+## What this does
+
+It adds a single AWS tag to your resources:
 
 ```
-aws-apn-id = pc:<AWS Marketplace product code>
+aws-apn-id = pc:<Jacobian Engineering product code>
 ```
 
-CloudFormation cannot natively tag resources it did not create, so these templates
-deploy a small **Lambda-backed custom resource** that applies the tag through the
-[AWS Resource Groups Tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/Welcome.html).
-Everything is self-contained in one template — no S3 packaging, no build step.
+That tag is how AWS attributes the AWS usage we help you operate to Jacobian
+Engineering. It does **not** grant anyone access to your account, move data, or
+change how your resources run. (CloudFormation can't tag existing resources on its
+own, so the template installs a small helper function that applies the tags for
+you and then sits idle.)
 
-> Not affiliated with or endorsed by AWS. Provided as-is under the MIT license.
+## Before you start (2 things)
 
-## Templates
+AWS PRM has **two** requirements. This template handles the first and checks the
+second:
+
+1. **Resource tagging** — done by this template. ✅
+2. **Cost Explorer must be enabled** in your account. The template detects whether
+   it's on and reports the result, but AWS provides no way to turn it on
+   automatically. If it's off, enable it once (takes 10 seconds, no cost to view):
+   **AWS Console → Billing and Cost Management → Cost Explorer → Launch Cost
+   Explorer.** More: [Enabling Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-enable.html).
+
+If you're not sure, email us and we'll confirm both for you.
+
+## Which template to use
 
 | Template | Use it when |
 | --- | --- |
-| [`templates/prm-tag-all.yaml`](templates/prm-tag-all.yaml) | You want to tag **every** supported resource in the account/region with **one** product code. |
-| [`templates/prm-tag-by-rules.yaml`](templates/prm-tag-by-rules.yaml) | You want to split resources across **multiple** product codes by service/resource-type or by existing tags. |
+| [`templates/prm-tag-all.yaml`](templates/prm-tag-all.yaml) | **Most customers.** Tag everything with one Jacobian service code. |
+| [`templates/prm-tag-by-rules.yaml`](templates/prm-tag-by-rules.yaml) | You use more than one Jacobian service and want to split resources between them. |
 
-Both accept an optional re-tag **schedule** (to catch newly created resources) and a
-`RemoveOnDelete` flag.
+Your Jacobian contact will tell you which product code(s) to use. They're also
+listed in [`docs/jacobian-product-codes.md`](docs/jacobian-product-codes.md).
 
-## Quick start
+## How to deploy (console, ~3 minutes)
 
-### Option 1 — tag everything with one code
+1. Sign in to the [AWS CloudFormation console](https://console.aws.amazon.com/cloudformation/)
+   in the **region** where your resources run. (Repeat for each region if you use
+   more than one.)
+2. **Create stack → With new resources (standard)**.
+3. **Upload a template file** → choose `templates/prm-tag-all.yaml` from this repo →
+   **Next**.
+4. **Stack name:** `jacobian-prm-tagging`. **ProductCode:** the code we gave you.
+   Leave the other options at their defaults. **Next → Next**.
+5. Check the box **"I acknowledge that AWS CloudFormation might create IAM
+   resources"** → **Submit**.
+6. When the stack shows **CREATE_COMPLETE**, you're done. The **Outputs** tab shows
+   the tag that was applied.
+
+Prefer the command line?
 
 ```bash
 aws cloudformation deploy \
   --template-file templates/prm-tag-all.yaml \
-  --stack-name prm-tagging \
+  --stack-name jacobian-prm-tagging \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides ProductCode=1xot9aw3srsz3tb25p2b17dmc
+  --region us-east-1 \
+  --parameter-overrides ProductCode=PASTE_CODE_HERE
 ```
 
-Add `ReTagSchedule='rate(1 day)'` to re-run daily and pick up new resources.
+## Options (all optional)
 
-### Option 2 — tag by rule
-
-Put your rules in a JSON string and pass them as the `TaggingRules` parameter:
-
-```bash
-RULES=$(tr -d '\n' < examples/rules-by-service.json)
-aws cloudformation deploy \
-  --template-file templates/prm-tag-by-rules.yaml \
-  --stack-name prm-tagging \
-  --capabilities CAPABILITY_IAM \
-  --parameter-overrides TaggingRules="$RULES"
-```
-
-You can also deploy either template from the AWS console: **CloudFormation → Create
-stack → Upload a template file**.
-
-## Rule format (advanced template)
-
-`TaggingRules` is a JSON array. Rules are evaluated **in order**; each resource is
-tagged by the **first** rule it matches, because a resource can carry only one
-`aws-apn-id` tag.
-
-```json
-[
-  { "productCode": "PENTEST_CODE",     "tagFilters":    [{ "Key": "PublicFacing", "Values": ["true"] }] },
-  { "productCode": "COMPLIANCE_CODE",  "resourceTypes": ["rds:db", "dynamodb:table"] },
-  { "productCode": "MANAGED_SVC_CODE" }
-]
-```
-
-Each rule:
-
-| Field | Required | Meaning |
+| Option | Default | What it does |
 | --- | --- | --- |
-| `productCode` | yes | The Marketplace product code (the tag becomes `pc:<productCode>`). |
-| `resourceTypes` | no | List of Tagging-API resource-type filters, e.g. `ec2:instance`, `rds:db`, `s3`. Omit to match all types. |
-| `tagFilters` | no | List of `{ "Key": ..., "Values": [...] }` filters on **existing** tags. Omit to match regardless of tags. A key with no values matches any value. |
+| `PreserveExistingTags` | `true` | **Won't overwrite another partner's tag.** If a resource already has an `aws-apn-id` tag from a different vendor, it's left alone. Set `false` only if you intend to reassign everything to Jacobian. |
+| `ReTagSchedule` | off | Re-run automatically (e.g. `rate(1 day)`) so resources you create later get tagged too. Recommended. |
+| `RemoveOnDelete` | `false` | If you delete the stack, leave the tags in place (default) so attribution isn't interrupted. Set `true` to also remove the tags. |
+| `PhoneHomeUrl` | off | If Jacobian gives you a URL, the template sends us a small status note (your account id, region, how many resources were tagged, and whether Cost Explorer is on) so we can confirm everything worked. No resource data or credentials are ever sent. |
 
-- A rule with neither `resourceTypes` nor `tagFilters` matches **every** taggable
-  resource — put it **last** as a catch-all.
-- The example above sends anything already tagged `PublicFacing=true` to a
-  penetration-testing code, databases to a compliance code, and everything else to
-  a managed-services code.
+## Does this overwrite tags from my other vendors?
 
-See [`examples/`](examples/) for ready-to-edit rule sets, and
-[`docs/rule-recipes.md`](docs/rule-recipes.md) for more patterns (public-facing
-selection, environment split, per-service split).
-
-## What resources get tagged
-
-Attribution is only surfaced for AWS's
-[PRM resource-tagging supported services](https://docs.aws.amazon.com/PRM/latest/aws-prm-onboarding-guide/resource-tagging-included-services.html)
-(EC2/EBS, RDS, S3 storage, Lambda, DynamoDB, ELB, EFS, EKS, ECS, CloudFront, API
-Gateway, Bedrock, CloudWatch Logs, AWS Backup, Secrets Manager, and more — ~90
-services). The templates attempt to tag whatever matches your rules; resource types
-that don't support tagging simply fail silently for that resource and never fail the
-stack.
-
-## Options
-
-| Parameter | Default | Notes |
-| --- | --- | --- |
-| `ReTagSchedule` | `""` (off) | EventBridge schedule expression, e.g. `rate(1 day)` or `cron(0 6 * * ? *)`. Re-runs tagging to catch new resources. |
-| `RemoveOnDelete` | `false` | If `true`, deleting the stack removes the `aws-apn-id` tag from all resources. Default keeps tags so **attribution is not interrupted** by a stack deletion. |
-
-## Notes and caveats
-
-- **One partner per resource.** Only one `aws-apn-id` tag is allowed per resource.
-  Rule order decides which code wins.
-- **IaC drift.** If a resource is managed by CloudFormation/Terraform/CDK, tagging
-  it out-of-band can show as drift, and a later `apply` can strip the tag. Prefer
-  adding `aws-apn-id` to your IaC default tags, or use `ReTagSchedule` to
-  re-apply regularly. Attribution stops the month a tag disappears.
-- **Per-region.** The Tagging API is regional. Deploy the stack in each region you
-  operate in.
-- **IAM scope.** The Lambda role grants tag actions across many services with
-  `Resource: "*"` — cross-service tagging can't be resource-scoped in practice.
-  Review [`templates/prm-tag-all.yaml`](templates/prm-tag-all.yaml) and trim the
-  action list to the services you actually use if you want tighter least-privilege.
-- **Cost.** The Lambda runs briefly on stack create/update (and on the optional
-  schedule). Effectively negligible.
-
-## How it works
-
-1. The stack creates an IAM role and a Python Lambda (source:
-   [`src/tagger.py`](src/tagger.py); a byte-compact copy is inlined in each
-   template).
-2. A `Custom::PrmTagger` resource invokes the Lambda on create/update. The Lambda
-   enumerates resources via `GetResources` and applies the tag via `TagResources`
-   in batches.
-3. If a schedule is set, an EventBridge rule re-invokes the Lambda periodically to
-   tag resources created since the last run.
-4. On stack delete, the Lambda removes tags only if `RemoveOnDelete=true`.
+**No, not by default.** A resource can only carry one `aws-apn-id` tag, so PRM allows
+one partner per resource. This template **skips** any resource that already has a
+different partner's `aws-apn-id` tag (`PreserveExistingTags=true`, the default). If
+you work with multiple AWS partners, use the rule-based template to divide resources
+deliberately, and talk to us first. See
+[`docs/rule-recipes.md`](docs/rule-recipes.md).
 
 ## Verifying
+
+In the CloudFormation **Outputs** tab you'll see the tag applied and the Cost
+Explorer status. To list tagged resources yourself:
 
 ```bash
 aws resourcegroupstaggingapi get-resources \
   --tag-filters Key=aws-apn-id \
-  --query 'ResourceTagMappingList[].{ARN:ResourceARN,Tags:Tags}'
+  --query 'ResourceTagMappingList[].ResourceARN'
 ```
+
+## Good to know
+
+- **Per region.** Deploy once per AWS region you use.
+- **Infrastructure-as-code drift.** If you manage resources with Terraform/CDK/
+  CloudFormation of your own, a future deploy could strip the tag. Turn on
+  `ReTagSchedule` to re-apply automatically, or add `aws-apn-id` to your own default
+  tags. (We're happy to advise.)
+- **Cost.** The helper function runs for a few seconds. Effectively free.
+- **Removing it.** Delete the `jacobian-prm-tagging` stack anytime. By default the
+  tags remain; set `RemoveOnDelete=true` first if you want them gone.
+
+## For engineers: how it works
+
+The stack creates an IAM role and a small Python Lambda (readable source:
+[`src/tagger.py`](src/tagger.py); a byte-compact copy is inlined in each template so
+the template is fully self-contained — no S3 packaging). A `Custom::PrmTagger`
+resource invokes it on create/update: it enumerates resources through the
+[Resource Groups Tagging API](https://docs.aws.amazon.com/resourcegroupstagging/latest/APIReference/Welcome.html),
+skips resources already tagged for another partner, applies the tag in batches,
+checks Cost Explorer, and optionally posts a status beacon. An optional EventBridge
+schedule re-runs it to catch new resources.
+
+Partners: [`templates/phone-home-receiver.yaml`](templates/phone-home-receiver.yaml)
+is a ready-to-deploy receiver (API Gateway → Lambda → DynamoDB) for the status
+beacons, for your own account.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Provided as-is; not affiliated with or endorsed by AWS.
